@@ -16,23 +16,39 @@ TSV tab-separated, wide:
   - Series     : filas = fecha (YYYY-MM-DD), columnas = gauge_id
 Missing value : " " (espacio entre comillas) → NaN vía pd.to_numeric
 
+Caché de zips (cache_dir)
+--------------------------
+Los zips (~10-40 MB c/u) se descargan una sola vez desde PANGAEA y se
+reutilizan en todas las extracciones. No se vuelven a bajar salvo que
+el archivo falte.
+
+Outputs por cuenca (datos_dir)
+------------------------------
+Si se indica datos_dir, las series extraídas se persisten como Parquet:
+  forzantes_{gauge_id}_{ini}_{fin}.parquet   PP + T + ETP + SWE
+  q_m3s_{gauge_id}_{ini}_{fin}.parquet       Caudal [m³/s]
+  atributos_{gauge_id}.json                  70+ atributos de cuenca
+En corridas posteriores se leen directo del Parquet sin tocar los zips.
+
 Variables disponibles (claves internas)
 ---------------------------------------
-  'precip_cr2'   Precipitación diaria [mm]   (CR2MET)
+  'precip_cr2'   Precipitación diaria [mm]      (CR2MET)
   'tmean_cr2'    Temperatura media diaria [°C]  (CR2MET)
   'tmin_cr2'     Temperatura mínima diaria [°C] (CR2MET)
   'tmax_cr2'     Temperatura máxima diaria [°C] (CR2MET)
+  'etp_har'      ETP diaria [mm]                (Hargreaves)
   'swe'          SWE diario [mm]
-  'q_m3s'        Caudal observado diario [m³/s]  (DGA)
+  'q_m3s'        Caudal observado diario [m³/s] (DGA)
   'q_mm'         Caudal observado diario [mm]
 
 Funciones públicas
 ------------------
-    listar_cuencas      Catálogo de 516 cuencas con coordenadas y área
-    cargar_atributos    70+ atributos de cuenca para uno o todos los gauges
-    cargar_forzantes    PP + T diarios para un gauge_id
-    cargar_caudal       Q diario [m³/s] para un gauge_id
-    descargar_dataset   Descarga selectiva de archivos al cache_dir
+    listar_cuencas          Catálogo de 516 cuencas con coordenadas y área
+    cargar_atributos        70+ atributos de cuenca para uno o todos los gauges
+    cargar_forzantes        PP + T + ETP diarios para un gauge_id
+    cargar_caudal           Q diario [m³/s] para un gauge_id
+    guardar_atributos_json  Persiste atributos como JSON en datos_dir
+    descargar_dataset       Descarga selectiva de archivos al cache_dir
 """
 
 from __future__ import annotations
@@ -63,10 +79,10 @@ _ARCHIVOS: dict[str, str] = {
     "swe":         "13_CAMELScl_swe.zip",
 }
 
-# Nombre del .txt dentro de cada zip
-_TXT_DENTRO: dict[str, str] = {k: v.replace(".zip", ".txt") for k, v in _ARCHIVOS.items()}
+_TXT_DENTRO: dict[str, str] = {
+    k: v.replace(".zip", ".txt") for k, v in _ARCHIVOS.items()
+}
 
-# Mapeo clave interna → nombre de columna en el DataFrame de salida
 _NOMBRE_COL: dict[str, str] = {
     "precip_cr2": "pp",
     "tmin_cr2":   "tmin",
@@ -78,7 +94,7 @@ _NOMBRE_COL: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
-# Descarga y caché
+# Descarga y caché de zips
 # ---------------------------------------------------------------------------
 def descargar_dataset(
     cache_dir: Union[str, Path],
@@ -86,14 +102,14 @@ def descargar_dataset(
     verbose: bool = True,
 ) -> None:
     """
-    Descarga archivos CAMELS-CL a cache_dir (solo si no existen).
+    Descarga archivos CAMELS-CL desde PANGAEA a cache_dir (solo si no existen).
 
     Parameters
     ----------
     cache_dir : directorio donde guardar los zips
     variables : claves a descargar; None = todas.
                 Opciones: 'atributos', 'q_m3s', 'q_mm', 'precip_cr2',
-                          'tmin_cr2', 'tmax_cr2', 'tmean_cr2', 'swe'
+                          'tmin_cr2', 'tmax_cr2', 'tmean_cr2', 'etp_har', 'swe'
     verbose   : True → imprime progreso
     """
     cache_dir = Path(cache_dir)
@@ -106,56 +122,43 @@ def descargar_dataset(
         if not dest.exists():
             url = _BASE_URL + _ARCHIVOS[key]
             if verbose:
-                print(f"[CAMELS] Descargando {_ARCHIVOS[key]} …")
+                print(f"[CAMELS] Descargando {_ARCHIVOS[key]} ...")
             urlretrieve(url, dest)
             if verbose:
                 size_mb = dest.stat().st_size / 1e6
                 print(f"         {size_mb:.1f} MB guardados en {dest}")
         elif verbose:
-            print(f"[CAMELS] {_ARCHIVOS[key]} ya en caché")
+            print(f"[CAMELS] {_ARCHIVOS[key]} ya en cache")
 
 
 # ---------------------------------------------------------------------------
 # Lectura interna
 # ---------------------------------------------------------------------------
 def _leer_tsv(cache_dir: Path, key: str, verbose: bool = True) -> pd.DataFrame:
-    """
-    Lee el TSV dentro del zip, descargando si es necesario.
-
-    Retorna DataFrame crudo: para series → DatetimeIndex × gauge_id;
-    para atributos → nombre_atributo × gauge_id (transponer para uso normal).
-    """
     dest = cache_dir / _ARCHIVOS[key]
     if not dest.exists():
         descargar_dataset(cache_dir, variables=[key], verbose=verbose)
-
     txt = _TXT_DENTRO[key]
     with zipfile.ZipFile(dest) as zf:
         with zf.open(txt) as f:
             df = pd.read_csv(
-                f,
-                sep="\t",
-                index_col=0,
-                na_values=[" ", ""],   # " " es el missing value de CAMELS-CL
-                keep_default_na=True,
+                f, sep="\t", index_col=0,
+                na_values=[" ", ""], keep_default_na=True,
             )
-    # Limpiar espacios en nombres de índice y columnas
     df.index = df.index.str.strip() if hasattr(df.index, "str") else df.index
     df.columns = df.columns.str.strip()
     return df
 
 
 def _normalizar_id(gauge_id: Union[str, int]) -> str:
-    """Normaliza gauge_id a string de entero limpio (sin espacios)."""
     return str(int(str(gauge_id).strip()))
 
 
 def _extraer_gauge(df: pd.DataFrame, gauge_id: Union[str, int]) -> pd.Series:
-    """Extrae columna de un gauge del DataFrame wide. Lanza KeyError si no existe."""
     gid = _normalizar_id(gauge_id)
     if gid not in df.columns:
         raise KeyError(
-            f"gauge_id '{gid}' no encontrado en el dataset. "
+            f"gauge_id '{gid}' no encontrado. "
             "Usa listar_cuencas() para ver los IDs disponibles."
         )
     s = df[gid].copy()
@@ -168,7 +171,6 @@ def _parsear_serie_temporal(
     inicio: Optional[str],
     fin: Optional[str],
 ) -> pd.Series:
-    """Convierte índice string → DatetimeIndex, valores a float, y recorta."""
     s.index = pd.to_datetime(s.index, format="%Y-%m-%d", errors="coerce")
     s.index.name = "date"
     s = pd.to_numeric(s, errors="coerce")
@@ -178,6 +180,10 @@ def _parsear_serie_temporal(
     if fin:
         s = s.loc[:fin]
     return s
+
+
+def _ruta_parquet(datos_dir: Path, nombre: str) -> Path:
+    return datos_dir / f"{nombre}.parquet"
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +210,6 @@ def listar_cuencas(
     df_raw = _leer_tsv(cache_dir, "atributos", verbose=verbose)
     df = df_raw.T.copy()
     df.index.name = "gauge_id"
-
     cols_map = {
         "gauge_name":          "nombre",
         "gauge_lat":           "lat",
@@ -244,17 +249,12 @@ def cargar_atributos(
     df_raw = _leer_tsv(cache_dir, "atributos", verbose=verbose)
     df = df_raw.T.copy()
     df.index.name = "gauge_id"
-
     if gauge_id is not None:
         gid = _normalizar_id(gauge_id)
         if gid not in df.index:
             raise KeyError(f"gauge_id '{gid}' no encontrado.")
         return df.loc[[gid]]
     return df
-
-
-def _ruta_parquet(datos_dir: Path, nombre: str) -> Path:
-    return datos_dir / f"{nombre}.parquet"
 
 
 def cargar_forzantes(
@@ -273,24 +273,24 @@ def cargar_forzantes(
     ----------
     cache_dir : directorio con los zips descargados de PANGAEA
     gauge_id  : ID de estación fluviométrica DGA (ej. 5410002)
-    inicio    : 'YYYY-MM-DD' o None (desde inicio del registro, 1979-01-01)
+    inicio    : 'YYYY-MM-DD' o None (desde inicio del registro)
     fin       : 'YYYY-MM-DD' o None (hasta fin del registro)
     variables : claves a cargar; subset de:
                 {'precip_cr2', 'tmin_cr2', 'tmax_cr2', 'tmean_cr2', 'etp_har', 'swe'}
-    datos_dir : si se indica, guarda/lee un Parquet en datos_dir/
-                forzantes_{gauge_id}_{inicio[:4]}_{fin[:4]}.parquet
-                En corridas posteriores, lee directo del Parquet sin tocar los zips.
+    verbose   : True → imprime progreso
+    datos_dir : si se indica, guarda/lee Parquet en datos_dir/
+                forzantes_{gauge_id}_{ini}_{fin}.parquet.
+                En corridas posteriores lee del Parquet sin tocar los zips.
 
     Returns
     -------
-    DataFrame con DatetimeIndex diario y columnas: 'pp', 'tmean', 'tmin', 'tmax',
-    'etp', 'swe' (según variables solicitadas). NaN donde no hay dato.
+    DataFrame con DatetimeIndex diario y columnas: pp, tmean, tmin, tmax, etp [, swe].
+    NaN donde no hay dato.
     """
     gid = _normalizar_id(gauge_id)
     ini_tag = (inicio or "0000")[:4]
-    fin_tag = (fin   or "9999")[:4]
+    fin_tag = (fin    or "9999")[:4]
 
-    # ── Leer desde Parquet si existe ─────────────────────────────────────────
     if datos_dir is not None:
         datos_dir = Path(datos_dir)
         parquet = _ruta_parquet(datos_dir, f"forzantes_{gid}_{ini_tag}_{fin_tag}")
@@ -299,17 +299,15 @@ def cargar_forzantes(
             needed = [_NOMBRE_COL[k] for k in variables if k in _NOMBRE_COL]
             if all(c in df.columns for c in needed):
                 if verbose:
-                    print(f"[CAMELS] forzantes leídas desde {parquet.name}")
+                    print(f"[CAMELS] forzantes leidas desde {parquet.name}")
                 return df[needed]
 
-    # ── Extraer desde zips ────────────────────────────────────────────────────
     cache_dir = Path(cache_dir)
     series: dict[str, pd.Series] = {}
-    for key in variables:
+    for key in list(variables):
         if key not in _NOMBRE_COL:
             raise ValueError(
-                f"Variable '{key}' no válida para forzantes. "
-                f"Opciones: {list(_NOMBRE_COL)}"
+                f"Variable '{key}' no valida. Opciones: {list(_NOMBRE_COL)}"
             )
         df_raw = _leer_tsv(cache_dir, key, verbose=verbose)
         s = _extraer_gauge(df_raw, gauge_id)
@@ -317,13 +315,9 @@ def cargar_forzantes(
         s.name = _NOMBRE_COL[key]
         series[s.name] = s
 
-    if not series:
-        return pd.DataFrame()
+    df = pd.DataFrame(series) if series else pd.DataFrame()
 
-    df = pd.DataFrame(series)
-
-    # ── Guardar Parquet ───────────────────────────────────────────────────────
-    if datos_dir is not None:
+    if not df.empty and datos_dir is not None:
         datos_dir.mkdir(parents=True, exist_ok=True)
         df.to_parquet(parquet)
         if verbose:
@@ -351,8 +345,9 @@ def cargar_caudal(
     inicio    : 'YYYY-MM-DD' o None
     fin       : 'YYYY-MM-DD' o None
     unidades  : 'm3s' (m³/s, default) | 'mm' (mm/día normalizado por área)
-    datos_dir : si se indica, guarda/lee un Parquet en datos_dir/
-                q_{unidades}_{gauge_id}_{inicio[:4]}_{fin[:4]}.parquet
+    verbose   : True → imprime progreso
+    datos_dir : si se indica, guarda/lee Parquet en datos_dir/
+                q_{unidades}_{gauge_id}_{ini}_{fin}.parquet
 
     Returns
     -------
@@ -364,10 +359,9 @@ def cargar_caudal(
 
     gid = _normalizar_id(gauge_id)
     ini_tag = (inicio or "0000")[:4]
-    fin_tag = (fin   or "9999")[:4]
+    fin_tag = (fin    or "9999")[:4]
     col_name = f"q_{unidades}"
 
-    # ── Leer desde Parquet si existe ─────────────────────────────────────────
     if datos_dir is not None:
         datos_dir = Path(datos_dir)
         parquet = _ruta_parquet(datos_dir, f"{col_name}_{gid}_{ini_tag}_{fin_tag}")
@@ -375,18 +369,15 @@ def cargar_caudal(
             s = pd.read_parquet(parquet).iloc[:, 0]
             s.name = col_name
             if verbose:
-                print(f"[CAMELS] caudal leído desde {parquet.name}")
+                print(f"[CAMELS] caudal leido desde {parquet.name}")
             return s
 
-    # ── Extraer desde zip ─────────────────────────────────────────────────────
     cache_dir = Path(cache_dir)
-    key = f"q_{unidades}"
-    df_raw = _leer_tsv(cache_dir, key, verbose=verbose)
+    df_raw = _leer_tsv(cache_dir, f"q_{unidades}", verbose=verbose)
     s = _extraer_gauge(df_raw, gauge_id)
     s = _parsear_serie_temporal(s, inicio, fin)
     s.name = col_name
 
-    # ── Guardar Parquet ───────────────────────────────────────────────────────
     if datos_dir is not None:
         datos_dir.mkdir(parents=True, exist_ok=True)
         s.to_frame().to_parquet(parquet)
@@ -403,10 +394,7 @@ def guardar_atributos_json(
     verbose: bool = True,
 ) -> Path:
     """
-    Guarda atributos de una cuenca como JSON en datos_dir.
-
-    El archivo se llama atributos_{gauge_id}.json y contiene todos los
-    atributos de la cuenca (70+ variables) en formato serializable.
+    Persiste atributos de una cuenca como JSON en datos_dir.
 
     Parameters
     ----------
@@ -416,7 +404,7 @@ def guardar_atributos_json(
 
     Returns
     -------
-    Path al archivo JSON creado.
+    Path al archivo JSON creado (o existente).
     """
     import json as _json
 
