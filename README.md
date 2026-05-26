@@ -73,6 +73,22 @@ q = cargar_caudal(CACHE, gauge_id="4308001",
 | `q_m3s` | Observed streamflow (DGA) | m³/s |
 | `q_mm` | Observed streamflow (area-normalized) | mm/d |
 
+## Dataset versions
+
+This loader targets **CAMELS-CL v2018** distributed via PANGAEA. A newer version is available directly from CR2:
+
+**CAMELS-CL v202201** — [cr2.cl/download/camels-cl-v202201](https://www.cr2.cl/download/camels-cl-v202201/)
+
+| | v2018 (PANGAEA) | v202201 (CR2) |
+|---|---|---|
+| Series through | ~2018 | April 2020 |
+| Precipitation products | CR2MET | CR2MET, CHIRPS, MSWEP, TMPA |
+| Distribution | Per-variable ZIPs | Single ZIP with CSVs |
+| Catchment boundaries | — | Shapefile included |
+| Attributes | `area`, `elev_mean` | `area_km2`, `mean_elev` |
+
+This loader is **not compatible** with v202201 due to format differences.
+
 ## License
 
 Data: CC BY 4.0 — cite Alvarez-Garreton et al. (2018).  
