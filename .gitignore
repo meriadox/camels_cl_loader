@@ -1,0 +1,19 @@
+# Cache de datos descargados (pueden pesar varios GB)
+cache/
+*.zip
+
+# Parquet intermedios
+*.parquet
+
+# Jupyter
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# Entornos
+.env
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
