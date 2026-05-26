@@ -44,6 +44,10 @@ q = cargar_caudal(CACHE, gauge_id="4308001",
                   inicio="1985-01-01", fin="2015-12-31")
 ```
 
+## Preview
+
+![PP, T, ETP and streamflow for Rio Turbio en Varillar (1985–2015)](docs/preview.png)
+
 ## Notebook
 
 `notebooks/exploracion_camels.ipynb` — interactive walkthrough:
